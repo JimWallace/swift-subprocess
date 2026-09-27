@@ -687,10 +687,32 @@ int _subprocess_fork_exec(
             if (signo == SIGKILL || signo == SIGSTOP) {
                 continue;
             }
+#if defined(__linux__)
+            // Not signal(): this child came from a raw clone3, so glibc's fork
+            // handlers never ran. glibc 2.41+ takes an internal abort lock in
+            // sigaction(SIGABRT), and posix_spawn/fork hold that lock while
+            // they run. A clone3 made while another thread held it gives this
+            // child a locked copy that nothing will ever release, and the
+            // child blocks here forever before exec. The raw syscall takes no
+            // lock. glibc refuses its two internal signals (32 and 33) with
+            // EINVAL, which ended this loop before; stop there to keep the
+            // same set of signals reset.
+            if (signo >= 32) {
+                break;
+            }
+            // An all-zero kernel sigaction is SIG_DFL with no flags and an
+            // empty mask, whatever the architecture's field order. 8 is the
+            // kernel's sigset size (_NSIG / 8) on every Linux target Swift supports.
+            uint64_t _default_action[8] = { 0 };
+            if (syscall(SYS_rt_sigaction, signo, _default_action, NULL, 8) == 0) {
+                continue;
+            }
+#else
             void (*err_ptr)(int) = signal(signo, SIG_DFL);
             if (err_ptr != SIG_ERR) {
                 continue;
             }
+#endif
 
             if (errno == EINVAL) {
                 break; // probably too high of a signal
